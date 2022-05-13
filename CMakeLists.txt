@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.2)
+set(CMAKE_CXX_FLAGS "-O3")
+project(head)
+find_package(OpenCV REQUIRED)
+add_executable(face main.cpp dlib/dlib/all/source.cpp MNN_UltraFace.cpp)
+target_include_directories(face PUBLIC dlib ${OpenCV_INCLUDE_DIRS} /usr/local/include/MNN)
+target_link_libraries(face LINK_PUBLIC X11 MNN pthread ${OpenCV_LIBS})

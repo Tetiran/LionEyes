@@ -1,0 +1,3 @@
+/home/lion/face/Face-detection-Raspberry-Pi-32-64-bits/MNN/build/CMakeFiles/rebuild_cache.dir
+/home/lion/face/Face-detection-Raspberry-Pi-32-64-bits/MNN/build/CMakeFiles/face.dir
+/home/lion/face/Face-detection-Raspberry-Pi-32-64-bits/MNN/build/CMakeFiles/edit_cache.dir
