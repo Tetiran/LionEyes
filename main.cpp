@@ -7,11 +7,13 @@
 #include <dlib/image_io.h>
 #include <stdio.h>
 #include <string.h>
-#include <fcntl.h> // Contains file controls like O_RDWR
-#include <errno.h> // Error integer and strerror() function
-#include <termios.h> // Contains POSIX terminal control definitions
-#include <unistd.h> // write(), read(), close()
-#include <math.h>       /* atan2 */
+#include <fcntl.h>
+#include <errno.h>
+#include <termios.h> 
+#include <unistd.h> 
+#include <math.h>
+#include <stdlib.h>
+#include <sys/time.h> 
 
 //using namespace dlib;
 
@@ -20,12 +22,35 @@
 #define XLEN 854.0
 #define YLEN 480.0
 using namespace std;
+#define MAX_DROP 20
+#define FACE_DISTANCE 50.0
 
-float lastpos[] = {XLEN/2.0, YLEN/2.0};
+#define FRAMESTILLSLEEP 200
+int MissedFrames = 0;
+
+float lastpos[2];
+float TargetFace[4];
 int tracking_state = 0;
 
 void calculate_angles(dlib::full_object_detection det, int serial);
-void serial_send(int serial, float x, float y, float r);
+void serial_send(float x, float y, float r);
+void change_event(int eventcode);
+
+int64_t LastEventTime;
+int NextBlink = 0;
+
+int FramesSinceSeen = 0;
+
+int64_t currentTimeMillis();
+
+int rollrand(int lower, int upper);
+
+void UpdateSleep();
+
+bool Sleep = false;
+bool LastSleepState = false;
+
+int serial_port;
 
 int main(int argc, char **argv) {
     float f =0;
@@ -37,11 +62,11 @@ int main(int argc, char **argv) {
     dlib::shape_predictor pose_model;
     dlib::deserialize("shape_predictor_5_face_landmarks.dat") >> pose_model;
 
-    chrono::steady_clock::time_point Tbegin, Tend, Tloop, Tlast;
+    chrono::steady_clock::time_point Tbegin, Tend, Tloop, TlastEvent;
     for(i=0;i<16;i++) FPS[i]=0.0;
 
 
-    int serial_port = open("/dev/ttyUSB0", O_RDWR);
+    serial_port = open("/dev/ttyUSB0", O_RDWR);
 
     // Check for errors
     if (serial_port < 0) {
@@ -94,11 +119,6 @@ int main(int argc, char **argv) {
 			appsink";
 
     cv::VideoCapture cap(gst);
-    /**
-    printf("res %f\n", cap.get(cv::CAP_PROP_BUFFERSIZE));
-    cap.set(cv::CAP_PROP_BUFFERSIZE, 3); 
-    printf("res2 %f\n", cap.get(cv::CAP_PROP_BUFFERSIZE));
-    **/
     // internal buffer will now store only 3 frames
     //nvarguscamerasrc ! video/x-raw(memory:NVMM), width=(int)1280, height=(int)720, format=(string)NV12, framerate=(fraction)30/1 ! nvvidconv flip-method=2 ! video/x-raw,width=(int)960, height=(int)616, ! appsink
     //nvcamerasrc ! video/x-raw(memory:NVMM), width=(int)1280, height=(int)720,format=(string)I420, framerate=(fraction)24/1 ! nvvidconv flip-method=2 ! video/x-raw, format=(string)BGRx ! videoconvert ! video/x-raw, format=(string)BGR ! appsink
@@ -109,6 +129,14 @@ int main(int argc, char **argv) {
     }
     cout << "Start grabbing, press ESC on Live window to terminate" << endl;
     Tloop = chrono::steady_clock::now();
+
+    LastEventTime = currentTimeMillis();
+
+
+    srand(time(0));
+
+    change_event(10);
+
     while(1){
         char read_buf [256];
 
@@ -118,7 +146,7 @@ int main(int argc, char **argv) {
         int n = read(serial_port, &read_buf, sizeof(read_buf));
         printf("%.*s",n,read_buf);
         float freq = 1000.0/(chrono::duration_cast <chrono::milliseconds> (Tloop - Tbegin).count());
-        printf("freq %0.2f\n", freq);
+        //printf("freq %0.2f\n", freq);
         if (freq > 1.0 && freq < framerate){
             int drop = 1;
             while(drop * freq < framerate){
@@ -143,44 +171,96 @@ int main(int argc, char **argv) {
         dlib::cv_image<dlib::bgr_pixel> cimg(frame);
         float lastdist = 10000;
 
-        FaceInfo* targetface  = NULL;
-
-        if(face_info.empty()){
-            tracking_state = 0;
-        }
+        bool FoundTarget = false;
         
+        //printf("lastpos at x: %0.2f, y: %0.2f\n", lastpos[0], lastpos[1]);
+
         for (auto face : face_info) {
+            FramesSinceSeen = 0;
+            Sleep = false;
             cv::Point pt1(face.x1, face.y1);
             cv::Point pt2(face.x2, face.y2);
             cv::rectangle(frame, pt1, pt2, cv::Scalar(0, 255, 0), 2);
             float x = (face.x1+face.x2)/2.0;
             float y = (face.y1+face.y2)/2.0;
-            if(tracking_state == 0){
+            //printf("face at x: %0.2f, y: %0.2f\n", x, y);
+            if (tracking_state == 0){
                 tracking_state = 1;
                 lastpos[0] = x;
                 lastpos[1] = y;
-                targetface = &face;
+                FoundTarget = true;
+                TargetFace[0] = face.x1;
+                TargetFace[1] = face.y1;
+                TargetFace[2] = face.x2;
+                TargetFace[3] = face.y2;
 
             } else if (tracking_state == 1){
                 float dist = sqrt( pow((lastpos[0] - x),2) + pow((lastpos[1] - y),2));
-                if (dist < lastdist){
-                    targetface = &face;
+                if (dist < lastdist && dist < FACE_DISTANCE){
+                    //printf("chosing targetface at distnace %0.2f x: %0.2f y: %0.2f\n", dist, x, y);
+                    FoundTarget = true;
+                    TargetFace[0] = face.x1;
+                    TargetFace[1] = face.y1;
+                    TargetFace[2] = face.x2;
+                    TargetFace[3] = face.y2;
                     lastdist = dist;
                 }
             }
-            
         }
 
-        if (targetface != NULL){
-            dlib::rectangle rect { (long int) (targetface->x1), (long int) (targetface->y1), 
-            (long int) (targetface->x2), (long int) (targetface->y2)};
+        if(FoundTarget == false){
+            FramesSinceSeen++;
+            if(FramesSinceSeen > FRAMESTILLSLEEP){
+                Sleep = true;
+            }
+        }
+        UpdateSleep();
+        
+
+        if (tracking_state == 1 && FoundTarget == false){
+            MissedFrames++;
+        }
+
+        if (MissedFrames >= MAX_DROP){
+            MissedFrames = 0;
+            tracking_state = 0;
+        }
+        //printf("missed frames %d\n", MissedFrames);
+        //printf("tracking state %d\n", tracking_state);
+        
+
+        if (FoundTarget){
+            //printf("target face x: %0.2f, y: %0.2f\n", (TargetFace[0]+TargetFace[2])/2.0, (TargetFace[1]+TargetFace[3])/2.0);
+            MissedFrames = 0;
+            lastpos[0] = (TargetFace[0]+TargetFace[2])/2.0;
+            lastpos[1] = (TargetFace[1]+TargetFace[3])/2.0;
+            dlib::rectangle rect { (long int) TargetFace[0], (long int) TargetFace[1], 
+            (long int) TargetFace[2], (long int) TargetFace[3]};
             dlib::full_object_detection det = pose_model(cimg, rect);
             cv::circle(frame, cv::Point(det.part(1).x(), det.part(1).y()), 2, cv::Scalar(0,255,0), 1, 8, 0);
             cv::circle(frame, cv::Point(det.part(3).x(), det.part(3).y()), 2, cv::Scalar(0,255,0), 1, 8, 0);
             calculate_angles(det, serial_port);
         }
+        if(!Sleep){
+            if (LastEventTime + NextBlink < currentTimeMillis()){
+                int event = 10;
+                int prob = rollrand(0,100);
+                if(prob > 90){
+                    event = 13;
+                } else if (prob <= 90 && prob > 80){
+                    event = 14;
+                } else if (prob <= 80 && prob > 60){
+                    event = 12;
+                } else {
+                    event = 11;
+                }
 
-        Tend = chrono::steady_clock::now();
+                NextBlink = rollrand(3000, 8000);
+                
+                LastEventTime = currentTimeMillis();
+                change_event(event);
+            }
+        }
 
         /*
         f = chrono::duration_cast <chrono::milliseconds> (Tend - Tbegin).count();
@@ -198,6 +278,30 @@ int main(int argc, char **argv) {
     return 0;
 }
 
+void UpdateSleep(){
+    if(LastSleepState != Sleep){
+        LastSleepState = Sleep;
+        printf("Changing sleep state to %d", Sleep);
+        if(Sleep){
+            change_event(2);
+        } else{
+            change_event(3);
+        }
+    }
+}
+
+int64_t currentTimeMillis() {
+  struct timeval time;
+  gettimeofday(&time, NULL);
+  int64_t s1 = (int64_t)(time.tv_sec) * 1000;
+  int64_t s2 = (time.tv_usec / 1000);
+  return s1 + s2;
+}
+
+int rollrand(int lower, int upper) {
+    return (rand() % (upper - lower + 1)) + lower;
+}
+
 
 void calculate_angles(dlib::full_object_detection det, int serial){
     //printf("left_eye %ld  %ld\n", det.part(1).x(), det.part(1).y());
@@ -208,16 +312,23 @@ void calculate_angles(dlib::full_object_detection det, int serial){
     float theta_x = (center_x/XLEN) * FOV_X - FOV_X/2.0;
     float theta_y = (center_y/YLEN) * FOV_Y - FOV_Y/2.0;
     float rotation = atan2( det.part(1).y()- det.part(3).y(), det.part(1).x() -det.part(3).x() ) * 180 / M_PI;
-    printf("theta_x %0.2f theta_y %0.2f rotation %0.2f\n", theta_x, theta_y, rotation);
-    serial_send(serial, theta_x, theta_y, rotation);
+    //printf("theta_x %0.2f theta_y %0.2f rotation %0.2f\n", theta_x, theta_y, rotation);
+    serial_send(theta_x, theta_y, rotation);
 }
 
-void serial_send(int serial, float x, float y, float r){
+void change_event(int eventcode){
+    printf("sending event code %d \n", eventcode);
+    char msg[10];
+    int n = sprintf(msg, "e%d", eventcode);
+    write(serial_port, msg, n+1);
+}
+
+void serial_send(float x, float y, float r){
     char msg[10];
     int n = sprintf(msg, "x%.2f", -x);
-    write(serial, msg, n+1);
+    write(serial_port, msg, n+1);
     n = sprintf(msg, "y%.2f", -y);
-    write(serial, msg, n+1);
+    write(serial_port, msg, n+1);
     n = sprintf(msg, "f%.2f", -r);
-    write(serial, msg, n+1);
+    write(serial_port, msg, n+1);
 }

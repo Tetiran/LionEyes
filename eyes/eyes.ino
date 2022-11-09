@@ -18,36 +18,18 @@ double theta_r=0;
 
 int deadband = 15;
 
-int headrollcenter = 90; //93
+int headrollcenter = 95;
 int headrollrange[] = {80, 105};
-int leftyawcenter = 77; //90
-int leftpitchcenter = 95; //90
-int rightyawcenter = 87; //100
-int rightpitchcenter = 115; //105
-int neckyawcenter = 130;
-int neckpitchcenter = 180;
+int leftyawcenter = 77;
+int leftpitchcenter = 95;
+int rightyawcenter = 87;
+int rightpitchcenter = 97;
+int neckyawcenter = 137;
+int neckpitchcenter = 100;
 int headpitchcenter = 55;
 
-int uppereyelidposes[] = {90,25};
-int lowereyelisposes[] = {75, 25};
-
-float headrollcommand = headrollcenter;
-float leftyawcommand = leftyawcenter;
-float leftpitchcommand = leftpitchcenter;
-float rightyawcommand = rightyawcenter;
-float rightpitchcommand = rightpitchcenter;
-float neckyawcommand = neckyawcenter;
-float neckpitchcommand = neckpitchcenter;
-float headpitchcommand = headpitchcenter;
-
-float headrollprev = headrollcenter;
-float leftyawprev = leftyawcenter;
-float leftpitchprev = leftyawcenter;
-float rightyawprev = rightyawcenter;
-float rightpitchprev = rightpitchcenter;
-float neckyawprev = neckyawcenter;
-float neckpitchprev = neckpitchcenter;
-float headpitchprev = headpitchcenter;
+int UpperEyeLidPoses[] = {90,25};
+int LowerEyeLidPoses[] = {75, 25};
 
 int routine = 5;
 float prevsmooth = 0.95;
@@ -60,16 +42,16 @@ int pos = 0;    // variable to store the servo position
 const int resolution = 13;
 const int freq = 50;
 
-const int LYawChannel = 1;
-const int RYawChannel = 2;
-const int LPitchChannel = 3;
-const int RPitchChannel = 4;
-const int NeckYawChannel = 5;
-const int NeckPitchChannel = 6;
-const int HeadRollChannel = 7;
-const int HeadPitchChannel = 8;
-const int UpperEyelidChannel = 9;
-const int LowerEyelidChannel = 10;
+const int LYawChannel = 0;
+const int RYawChannel = 1;
+const int LPitchChannel = 2;
+const int RPitchChannel = 3;
+const int NeckYawChannel = 4;
+const int NeckPitchChannel = 5;
+const int HeadRollChannel = 6;
+const int HeadPitchChannel = 7;
+const int UpperEyelidChannel = 8;
+const int LowerEyelidChannel = 9;
 
 const int LYawPin = 21;
 const int RYawPin = 22;
@@ -86,6 +68,7 @@ const int LowerEyelidPin = 13;
 int blink_state = 0;
 long last_blink_time = 0;
 long LastHeadRollTime = 0;
+long LastYawTime = 0;
 float CurrBlinkPercent = 0.0;
 float TargetBlinkPercent = 0.0;
 float EndBlinkPercent = 0.0;
@@ -93,9 +76,26 @@ int BlinkSpeed = 0;
 float BlinkStep = 0.0;
 
 float HeadRateLimit = 0.5;
+float YawRateLimit = 0.9;
 
 const float BlinkUpdateFreq = 20.0;
 const float RollUpdateFreq = 40.0;
+const float YawUpdateFreq = 40.0;
+
+long SquintInitTime =0;
+#define SQUINTTIME 3000
+int EventCode = 0;
+
+#define NUMCONTROLLERS 10
+#define ACTIVEVENT 10
+
+float ControlTarget[NUMCONTROLLERS];
+float ControlCurrValue[NUMCONTROLLERS];
+long ControlLastTime[NUMCONTROLLERS];
+float ControlFreq[NUMCONTROLLERS];
+float ControlStepSize[NUMCONTROLLERS];
+bool ControlActive[NUMCONTROLLERS];
+
 
 
 int angleToDC(float angle){
@@ -104,11 +104,33 @@ int angleToDC(float angle){
 
 void blink(float ClosePercent, float EndPercent, float step);
 
-void UpdateBlink();
-
 void UpdateRoll();
 
+void SetControlState(int idx, float Target, float Freq, float StepSize);
+
+void UpdateController(int idx);
+
+void UpdateControllers();
+
+bool QueryControllers();
+
+void UpdateYaw(float target);
+
+#define EVENTQUEUESIZE 10
+int EventQueue[EVENTQUEUESIZE];
+
 void setup() {
+
+  for(int i=0; i<EVENTQUEUESIZE; i++){
+      EventQueue[i] = -1;
+  }
+
+  ControlCurrValue[HeadPitchChannel] = headpitchcenter;
+  ControlCurrValue[NeckPitchChannel] = neckpitchcenter;
+  ControlCurrValue[NeckYawChannel] = neckyawcenter;
+  ControlCurrValue[HeadRollChannel] = headrollcenter;
+  ControlCurrValue[UpperEyelidChannel] = UpperEyeLidPoses[0];
+  ControlCurrValue[LowerEyelidChannel] = LowerEyeLidPoses[0];
 
   ledcSetup(LYawChannel, freq, resolution);
   ledcSetup(RYawChannel, freq, resolution);
@@ -140,239 +162,365 @@ void setup() {
   ledcWrite(NeckPitchChannel, angleToDC(neckpitchcenter));
   ledcWrite(HeadRollChannel, angleToDC(headrollcenter));
   ledcWrite(HeadPitchChannel, angleToDC(headpitchcenter));
-  ledcWrite(UpperEyelidChannel, angleToDC(uppereyelidposes[0]));
-  ledcWrite(LowerEyelidChannel, angleToDC(lowereyelisposes[0]));
+  ledcWrite(UpperEyelidChannel, angleToDC(UpperEyeLidPoses[0]));
+  ledcWrite(LowerEyelidChannel, angleToDC(LowerEyeLidPoses[0]));
 
-  delay(1000);
   Serial.begin(115200);
 }
+long last_send = 0;
 
 void loop() {
-  if(routine == 5){
+  /*
+  if(last_send+3000<millis()){
+    Serial.print("currently in event");
+    Serial.println(EventCode);
+    last_send=millis();
+  }
+  */
+  
+  if(EventCode != 1){
     while (Serial.available() > 0) {
-      // read the incoming bytes:
       int rlen = Serial.readBytesUntil('\0', buf, BUFFER_SIZE);
-      Serial.println(buf);
+      buf[rlen] = '\n';
       if (buf[0] == 'x'){
           theta_x = atof(buf+1);
       } else if (buf[0] == 'y'){
           theta_y = atof(buf+1);
       } else if (buf[0] == 'f'){
           theta_r = atof(buf+1);
+      } else if (buf[0] == 'e'){
+          int nextevent = atoi(buf+1);
+          Serial.print("got event ");
+          Serial.println(nextevent);
+          for(int i=0; i < EVENTQUEUESIZE; i++){
+            if(EventQueue[i] == -1){
+              Serial.print("putting event ");
+              Serial.print(nextevent);
+              Serial.print(" at index ");
+              Serial.println(i);
+              EventQueue[i] = nextevent;
+              break;
+            }
+          }
       }
     }
   }
-  if (routine == 11){
-    blink(.8, 0.1, .02);
+
+  // set event state
+  if(EventCode == 0 || EventCode == ACTIVEVENT){
+    if(EventQueue[0] != -1){
+      /*
+      Serial.println("event queue");
+      for(int i=0; i< EVENTQUEUESIZE; i++){
+        Serial.println(EventQueue[i]);
+      }*/
+      EventCode = EventQueue[0];
+      Serial.print("switching to event");
+      Serial.print(EventCode);
+      // shift events forward
+      for(int i=0; i < EVENTQUEUESIZE-1; i++){
+        EventQueue[i] = EventQueue[i+1];
+      }
+      // kill last event
+      EventQueue[EVENTQUEUESIZE-1]= -1;      
+    }
   }
 
-  if(routine==0){
-    ledcWrite(LYawChannel, angleToDC(leftyawcenter));
-    ledcWrite(RYawChannel, angleToDC(rightyawcenter));
-    ledcWrite(LPitchChannel, angleToDC(leftpitchcenter));
-    ledcWrite(RPitchChannel, angleToDC(rightpitchcenter));
-    ledcWrite(NeckYawChannel, angleToDC(neckyawcenter));
-    ledcWrite(NeckPitchChannel, angleToDC(neckpitchcenter));
-    ledcWrite(HeadRollChannel, angleToDC(headrollcenter));
-    ledcWrite(HeadPitchChannel, angleToDC(headpitchcenter));
-    delay(500);
-  }
-  
-  //Set routine
-  if(routine==1){
-    delay(500);
-    leftyawcommand = leftyawcenter+60;
-    rightyawcommand = rightyawcenter+60;
-    leftpitchcommand = leftpitchcenter+40;
-    rightpitchcommand = rightpitchcenter+40;
-    headrollcommand = headrollcenter+30;
-    headpitchcommand = headpitchcenter+10;
-    neckyawcommand = neckyawcenter+20;
-    neckpitchcommand = neckpitchcenter+20;
-    servocontrol(leftyawcommand,rightyawcommand,leftpitchcommand,rightpitchcommand,headrollcommand,headpitchcommand,neckyawcommand,neckpitchcommand,duration);
-    servocontrol(leftyawcenter,rightyawcenter,leftpitchcenter,rightpitchcenter,headrollcenter,headpitchcenter,neckyawcenter,neckpitchcenter,duration);
-    routine=2;
-  }
-  if(routine==2){
-    delay(500);
-    leftyawcommand = leftyawcenter-60;
-    rightyawcommand = rightyawcenter-60;
-    leftpitchcommand = leftpitchcenter+40;
-    rightpitchcommand = rightpitchcenter+40;
-    headrollcommand = headrollcenter-30;
-    headpitchcommand = headpitchcenter-10;
-    neckyawcommand = neckyawcenter-20;
-    neckpitchcommand = neckpitchcenter-20;
-    servocontrol(leftyawcommand,rightyawcommand,leftpitchcommand,rightpitchcommand,headrollcommand,headpitchcommand,neckyawcommand,neckpitchcommand,duration);
-    servocontrol(leftyawcenter,rightyawcenter,leftpitchcenter,rightpitchcenter,headrollcenter,headpitchcenter,neckyawcenter,neckpitchcenter,duration);
-    routine=1;    
-  }
-  if(routine==3){
-    delay(500);
-    leftyawcommand = leftyawcenter;
-    rightyawcommand = rightyawcenter;
-    leftpitchcommand = leftpitchcenter-40;
-    rightpitchcommand = rightpitchcenter-40;
-    headrollcommand = headrollcenter;
-    servocontrol(leftyawcommand,rightyawcommand,leftpitchcommand,rightpitchcommand,headrollcommand,headpitchcommand,neckyawcommand,neckpitchcommand,duration);
-    servocontrol(leftyawcenter,rightyawcenter,leftpitchcenter,rightpitchcenter,headrollcenter,headpitchcommand,neckyawcommand,neckpitchcommand,duration);
-    routine=4;     
-  }
-  if(routine==4){
-    delay(500);
-    leftyawcommand = leftyawcenter;
-    rightyawcommand = rightyawcenter;
-    leftpitchcommand = leftpitchcenter+40;
-    rightpitchcommand = rightpitchcenter+40;
-    headrollcommand = headrollcenter;
-    servocontrol(leftyawcommand,rightyawcommand,leftpitchcommand,rightpitchcommand,headrollcommand,headpitchcommand,neckyawcommand,neckpitchcommand,duration);
-    servocontrol(leftyawcenter,rightyawcenter,leftpitchcenter,rightpitchcenter,headrollcenter,headpitchcommand,neckyawcommand,neckpitchcommand,duration);
-    routine=1;     
-  }
-  if (routine==5){
-    leftyawcommand = leftyawcenter;
-    rightyawcommand = rightyawcenter;
-    neckyawcommand = neckyawcenter;
+  // eye tracking base case
+  if (EventCode >= ACTIVEVENT && EventCode < 1000){
 
     if (theta_x > neckposlast + deadband){
       neckposlast = theta_x - deadband;
     } else if (theta_x < neckposlast - deadband){
       neckposlast = theta_x + deadband;
     }
-    //Serial.println(neckposlast);
-    neckyawcommand = neckyawcenter + neckposlast;
-    leftyawcommand = leftyawcenter + (theta_x - neckposlast);
-    rightyawcommand = rightyawcenter + (theta_x - neckposlast);
-    leftpitchcommand = leftpitchcenter + theta_y;
-    rightpitchcommand = rightpitchcenter + theta_y;
-    
-    //headpitchcommand = headpitchcenter;
-    //neckpitchcommand = neckpitchcenter;
-    UpdateRoll();
-    ledcWrite(LYawChannel, angleToDC(leftyawcommand));
-    ledcWrite(RYawChannel, angleToDC(rightyawcommand));
-    ledcWrite(LPitchChannel, angleToDC(leftpitchcommand));
-    ledcWrite(RPitchChannel, angleToDC(rightpitchcommand));
-    //servocontrol(leftyawcommand,rightyawcommand,leftpitchcommand,rightpitchcommand,headrollcommand,headpitchcommand,neckyawcommand,neckpitchcommand,duration);
-    /*
-    leftyaw.write(leftyawcommand);
-    rightyaw.write(rightyawcommand);
-    leftpitch.write(leftpitchcommand);
-    rightpitch.write(rightpitchcommand);
-    headroll.write(headrollcommand);
-    headpitch.write(headpitchcommand);
-    neckyaw.write(neckyawcommand);
-    neckpitch.write(neckpitchcommand);*/
+    float NeckYawTarget = neckyawcenter + neckposlast;
 
+    ControlCurrValue[LYawChannel] = leftyawcenter + (theta_x - neckposlast);
+    ControlCurrValue[RYawChannel] = rightyawcenter + (theta_x - neckposlast);
+    ControlCurrValue[LPitchChannel] = leftpitchcenter + theta_y;
+    ControlCurrValue[RPitchChannel] = rightpitchcenter + theta_y;
+
+    UpdateRoll();
+    UpdateYaw(NeckYawTarget);
+    ledcWrite(LYawChannel, angleToDC(ControlCurrValue[LYawChannel]));
+    ledcWrite(RYawChannel, angleToDC(ControlCurrValue[RYawChannel]));
+    ledcWrite(LPitchChannel, angleToDC(ControlCurrValue[LPitchChannel]));
+    ledcWrite(RPitchChannel, angleToDC(ControlCurrValue[RPitchChannel]));
   }
-  if(routine == 10){
+
+  // blink once fast
+  if (EventCode == 11){
+    if(QueryControllers()){
+      SetControlState(UpperEyelidChannel, UpperEyeLidPoses[1], 20, 15);
+      SetControlState(LowerEyelidChannel, LowerEyeLidPoses[1], 20, 15);
+      EventCode = 111;
+    }
+  } else if (EventCode == 111){
+    if(QueryControllers()){
+      SetControlState(UpperEyelidChannel, UpperEyeLidPoses[0], 20, 15);
+      SetControlState(LowerEyelidChannel, LowerEyeLidPoses[0], 20, 15);
+      EventCode = 211;
+    }
+  } else if(EventCode == 211){
+    if(QueryControllers()){
+      EventCode = ACTIVEVENT;
+    }
+  }
+
+  // blink twice fast
+  if (EventCode == 12){
+    if(QueryControllers()){
+      SetControlState(UpperEyelidChannel, UpperEyeLidPoses[1], 20, 15);
+      SetControlState(LowerEyelidChannel, LowerEyeLidPoses[1], 20, 15);
+      EventCode = 112;
+    }
+  } else if (EventCode == 112){
+    if(QueryControllers()){
+      SetControlState(UpperEyelidChannel, UpperEyeLidPoses[0], 20, 15);
+      SetControlState(LowerEyelidChannel, LowerEyeLidPoses[0], 20, 15);
+      EventCode = 212;
+    }
+  } else if(EventCode == 212){
+    if(QueryControllers()){
+      SetControlState(UpperEyelidChannel, UpperEyeLidPoses[1], 20, 15);
+      SetControlState(LowerEyelidChannel, LowerEyeLidPoses[1], 20, 15);
+      EventCode = 312;
+    }
+  } else if (EventCode == 312){
+    if(QueryControllers()){
+      SetControlState(UpperEyelidChannel, UpperEyeLidPoses[0], 20, 15);
+      SetControlState(LowerEyelidChannel, LowerEyeLidPoses[0], 20, 15);
+      EventCode = 412;
+    }
+  } else if(EventCode == 412){
+    if(QueryControllers()){
+      EventCode = ACTIVEVENT;
+    }
+  }
+
+  // blink once slowly
+  if (EventCode == 13){
+    if(QueryControllers()){
+      SetControlState(UpperEyelidChannel, UpperEyeLidPoses[1], 20, 5);
+      SetControlState(LowerEyelidChannel, LowerEyeLidPoses[1], 20, 5);
+      EventCode = 113;
+    }
+  } else if (EventCode == 113){
+    if(QueryControllers()){
+      SetControlState(UpperEyelidChannel, UpperEyeLidPoses[0], 20, 5);
+      SetControlState(LowerEyelidChannel, LowerEyeLidPoses[0], 20, 5);
+      EventCode = 213;
+    }
+  } else if(EventCode == 213){
+    if(QueryControllers()){
+      EventCode = ACTIVEVENT;
+    }
+  }
+
+  if (EventCode == 14){
+    if(QueryControllers()){
+      SetControlState(NeckPitchChannel , 50, 60, .3);
+      SetControlState(HeadPitchChannel , 110, 60, .3);
+      EventCode = 114;
+    }
+  } else if (EventCode == 114) {
+    if(QueryControllers()){
+      SetControlState(UpperEyelidChannel, (UpperEyeLidPoses[1] + UpperEyeLidPoses[0])/2.0, 20, 3);
+      SetControlState(LowerEyelidChannel, (LowerEyeLidPoses[1] + LowerEyeLidPoses[0])/2.0, 20, 3);
+      EventCode = 214;
+    }
+  } else if (EventCode == 214){
+    if(QueryControllers()){
+      SquintInitTime = millis();
+      EventCode = 314;
+    }
+  } else if (EventCode == 314){
+    if((SquintInitTime + SQUINTTIME) < millis()){
+      SetControlState(UpperEyelidChannel, UpperEyeLidPoses[0], 20, 3);
+      SetControlState(LowerEyelidChannel, LowerEyeLidPoses[0], 20, 3);
+      EventCode = 414;
+    }
+  } else if (EventCode == 414){
+    if(QueryControllers()){
+      SetControlState(NeckPitchChannel , neckpitchcenter, 60, .3);
+      SetControlState(HeadPitchChannel , headpitchcenter, 60, .3);
+      EventCode=  514;
+    }
+  } else if (EventCode == 514){
+    if(QueryControllers()){
+      EventCode = ACTIVEVENT;
+    }
+  }
+
+
+
+  // go to sleep end at event 0
+  if(EventCode == 2){
+    if(QueryControllers()){
+      SetControlState(LYawChannel, leftyawcenter, 20, 3);
+      SetControlState(RYawChannel, rightyawcenter, 20, 3);
+      SetControlState(LPitchChannel, leftpitchcenter, 20, 3);
+      SetControlState(RPitchChannel, rightpitchcenter, 20, 3);
+      EventCode = 1102;
+    }
+  } else if(EventCode == 1102){
+    if(QueryControllers()){
+      SetControlState(UpperEyelidChannel, UpperEyeLidPoses[1], 20, 2);
+      SetControlState(LowerEyelidChannel, LowerEyeLidPoses[1], 20, 2);
+      SetControlState(HeadRollChannel, headrollcenter, 20, .3);
+      SetControlState(NeckYawChannel, neckyawcenter, 20, .3);
+      EventCode = 1202;
+    }
+  } else if(EventCode == 1202){
+    if(QueryControllers()){
+      SetControlState(NeckPitchChannel , 50, 60, .3);
+      SetControlState(HeadPitchChannel , 100, 60, .3);
+      EventCode = 1302;
+    }
+  } else if(EventCode == 1302){
+    if(QueryControllers()){
+      SetControlState(NeckPitchChannel , 27, 60, .3);
+      SetControlState(HeadPitchChannel , 80, 60, .3);
+      EventCode = 1402;
+    }
+  } else if(EventCode == 1402){
+    if (QueryControllers()){
+      EventCode = 0;
+    }
+  }
+
+  //wake up, end at active event
+  if(EventCode == 3){
+    if(QueryControllers()){
+      SetControlState(UpperEyelidChannel, UpperEyeLidPoses[0], 20, 15);
+      SetControlState(LowerEyelidChannel, LowerEyeLidPoses[0], 20, 15);
+      EventCode = 1103;
+    }
+  } else if(EventCode == 1103){
+    if(QueryControllers()){
+      SetControlState(NeckPitchChannel , 50, 60, .2);
+      SetControlState(HeadPitchChannel , 100, 60, .6);
+      EventCode = 1203;
+    }
+  } else if (EventCode == 1203){
+    if(QueryControllers()){
+      SetControlState(NeckPitchChannel , neckpitchcenter, 60, .6);
+      SetControlState(HeadPitchChannel , headpitchcenter, 60, .6);
+      EventCode = 1303;
+    }
+  } else if(EventCode == 1303){
+    if (QueryControllers()){
+      EventCode = ACTIVEVENT;
+    }
+  }
+
+  // calibration mode
+  if(EventCode == 1){
     static bool state = false;
     static int channel = -1;
     if (Serial.available()> 0){
       int rlen = Serial.readBytesUntil('\n', buf, BUFFER_SIZE);
       buf[rlen] = '\n';
       //Serial.println(buf);
-      int val = atoi(buf);
-      if (!state){
-        Serial.print("selecting channel ");
-        Serial.println(val);
-        channel = val;
-        state = true;
+      if (buf[0] == 'e'){
+          EventCode = atoi(buf+1);
       } else{
-        Serial.print("writing value ");
-        Serial.print(val);
-        Serial.print("on channel ");
-        Serial.println(channel);
-        ledcWrite(channel, angleToDC(val));
-        state = false;
+
+        int val = atoi(buf);
+        if (!state){
+          Serial.print("selecting channel ");
+          Serial.println(val);
+          channel = val;
+          state = true;
+        } else{
+          Serial.print("writing value ");
+          Serial.print(val);
+          Serial.print("on channel ");
+          Serial.println(channel);
+          ledcWrite(channel, angleToDC(val));
+          state = false;
+        }
       }
     }
   }
-  UpdateBlink();
+  UpdateControllers();
+}
+
+bool QueryControllers(){
+  for (int i = 0; i < NUMCONTROLLERS; i++){
+    if (ControlActive[i]){
+      return false;
+    }
+  }
+  return true;
+}
+
+void UpdateYaw(float target){
+  if (LastYawTime + 1000.0/YawUpdateFreq < millis() ){
+    LastYawTime = millis();
+    float diff = target - ControlCurrValue[NeckYawChannel];
+    if (diff > 0){
+      ControlCurrValue[NeckYawChannel] += YawRateLimit;
+    } else{   
+      ControlCurrValue[NeckYawChannel] -= YawRateLimit;
+    }
+    ledcWrite(NeckYawChannel, angleToDC(ControlCurrValue[NeckYawChannel]));
+  }
 }
 
 void UpdateRoll(){
   if (LastHeadRollTime + 1000.0/RollUpdateFreq < millis() ){
     LastHeadRollTime = millis();
-    float diff = headrollcommand - (headrollcenter + theta_r/2.0);
+    float diff = ControlCurrValue[HeadRollChannel] - (headrollcenter + theta_r/2.0);
     if (diff > 0){
-      headrollcommand -= HeadRateLimit;
+      ControlCurrValue[HeadRollChannel] -= HeadRateLimit;
     } else{   
-      headrollcommand += HeadRateLimit;
+      ControlCurrValue[HeadRollChannel] += HeadRateLimit;
     }
-    headrollcommand = constrain(headrollcommand, headrollrange[0], headrollrange[1]);
-    Serial.println(headrollcommand);
-    ledcWrite(HeadRollChannel, angleToDC(headrollcommand));
+    ControlCurrValue[HeadRollChannel] = constrain(ControlCurrValue[HeadRollChannel], headrollrange[0], headrollrange[1]);
+    ledcWrite(HeadRollChannel, angleToDC(ControlCurrValue[HeadRollChannel]));
   }
 }
 
-void UpdateBlink(){
-  if(blink_state !=0){
-    if (last_blink_time + 1000.0/BlinkUpdateFreq < millis() ){
-      last_blink_time = millis();
-      float target = 0;
-      if(blink_state == 1){
-        target = TargetBlinkPercent;
-      } else if (blink_state == 2){
-        target = EndBlinkPercent;
-      } else if (blink_state == 3){
-        blink_state = 0;
-      }
-      if (blink_state == 1 || blink_state == 2){
-        float diff = target - CurrBlinkPercent;
-        if (diff>0){
-          CurrBlinkPercent+= (BlinkStep);
-          if (CurrBlinkPercent>=target){
-            blink_state++;
+void UpdateControllers(){
+  for(int i =0; i<NUMCONTROLLERS; i++){
+    UpdateController(i);
+  }
+}
+
+void SetControlState(int idx, float Target, float Freq, float StepSize){
+  ControlActive[idx] = true;
+  ControlTarget[idx] = Target;
+  ControlFreq[idx] = Freq;
+  ControlStepSize[idx] = StepSize;
+}
+
+void UpdateController(int idx){
+  if (ControlActive[idx]){
+    if (ControlLastTime[idx] + 1000.0/ControlFreq[idx] < millis() ){
+      ControlLastTime[idx] = millis();
+      float diff = ControlTarget[idx] - ControlCurrValue[idx];
+      if (diff > 0){
+            ControlCurrValue[idx] += ControlStepSize[idx];
+            if (ControlCurrValue[idx] >= ControlTarget[idx]){
+              ControlCurrValue[idx] = ControlTarget[idx];
+              ControlActive[idx] = false;
+            }
+          } else{
+            ControlCurrValue[idx]-= ControlStepSize[idx];
+            if (ControlCurrValue[idx] <= ControlTarget[idx]){
+              ControlCurrValue[idx] = ControlTarget[idx];
+              ControlActive[idx] = false;
+            }
           }
-        } else{
-          CurrBlinkPercent-= (BlinkStep);
-          if (CurrBlinkPercent<=target){
-            blink_state++;
-          }
-        }
-        ledcWrite(UpperEyelidChannel, angleToDC(CurrBlinkPercent * (uppereyelidposes[1]-uppereyelidposes[0]) + uppereyelidposes[0]));
-        ledcWrite(LowerEyelidChannel, angleToDC(CurrBlinkPercent * (lowereyelisposes[1]-lowereyelisposes[0]) + lowereyelisposes[0]));
-      }
+          /*
+      Serial.print("commanding channel ");
+      Serial.print(idx);
+      Serial.print(" to value ");
+      Serial.println(ControlCurrValue[idx]);
+      */
+      ledcWrite(idx, angleToDC(ControlCurrValue[idx]));
     }
   }
-}
-
-void blink(float ClosePercent, float EndPercent, float step){
-  if (blink_state == 0){
-    blink_state = 1;
-    TargetBlinkPercent = ClosePercent;
-    EndBlinkPercent = EndPercent;
-    BlinkStep = step;
-  }
-}
-
-void servocontrol(int leftyawcommand, int rightyawcommand, int leftpitchcommand, int rightpitchcommand,int headrollcommand, int headpitchcommand, int neckyawcommand, int neckpitchcommand, int duration){
-     for(int i=1; i<=duration; i += 1){ 
-      leftyawprev=leftyawprev*prevsmooth+leftyawcommand*comsmooth;
-      rightyawprev=rightyawprev*prevsmooth+rightyawcommand*comsmooth;
-      leftpitchprev=leftpitchprev*prevsmooth+leftpitchcommand*comsmooth;
-      rightpitchprev=rightpitchprev*prevsmooth+rightpitchcommand*comsmooth;
-      //headrollprev=headrollprev*prevsmooth+headrollcommand*comsmooth;
-      headpitchprev=headpitchprev*prevsmooth+headpitchcommand*comsmooth;
-      //neckyawprev=neckyawprev*prevsmooth+neckyawcommand*comsmooth;
-      neckpitchprev=neckpitchprev*prevsmooth+neckpitchcommand*comsmooth;
-      //ledcWrite(LYawChannel, angleToDC(leftyawprev));
-      //ledcWrite(RYawChannel, angleToDC(rightyawprev));
-      //ledcWrite(LPitchChannel, angleToDC(leftpitchprev));
-      //ledcWrite(RPitchChannel, angleToDC(rightpitchprev));
-      //ledcWrite(NeckYawChannel, angleToDC(neckyawcenter));
-      ledcWrite(NeckPitchChannel, angleToDC(neckpitchprev));
-      //ledcWrite(HeadRollChannel, angleToDC(headrollprev));
-      ledcWrite(HeadPitchChannel, angleToDC(headpitchprev));
-      delay(3);
-    }
-    //ledcWrite(LYawChannel, angleToDC(leftyawcommand));
-    //ledcWrite(RYawChannel, angleToDC(rightyawcommand));
-    //ledcWrite(LPitchChannel, angleToDC(leftpitchcommand));
-    //ledcWrite(RPitchChannel, angleToDC(rightpitchcommand));
-    //ledcWrite(HeadRollChannel, angleToDC(headrollcommand));
-    ledcWrite(HeadPitchChannel, angleToDC(headpitchcommand));
-    //neckyaw.write(neckyawcommand);
-    ledcWrite(NeckPitchChannel, angleToDC(neckpitchcommand));
 }
